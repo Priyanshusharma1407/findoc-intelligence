@@ -43,6 +43,8 @@ If the answer is not in the context, say "I could not find this information in t
 
 Always be precise, cite source numbers like [1], [2] when referencing specific content.
 For financial figures, preserve exact numbers from the source.
+When comparing financial figures, always convert to the same unit before comparing.
+Double check all arithmetic before stating a final number.
 
 Context:
 {context}"""

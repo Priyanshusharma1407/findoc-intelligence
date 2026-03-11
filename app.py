@@ -1,19 +1,26 @@
 import os
-import time
 import streamlit as st
 from dotenv import load_dotenv
+from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from qdrant_client.models import VectorParams, Distance
 
 from ingestion import ingest_document
-from retrieval import build_bm25_index, retrieve, upload_documents, client, COLLECTION_NAME
+from retrieval import build_bm25_index, retrieve, upload_documents, client, COLLECTION_NAME, VECTOR_SIZE
 from generation import generate_answer, update_history
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 llm = ChatGroq(api_key=GROQ_API_KEY, model="llama-3.1-8b-instant", temperature=0)
+
+
+
+if st.text_input("Enter password", type="password") != st.secrets["password"]:
+    st.stop()
+
 
 # ── Page Config ────────────────────────────────────────────
 
@@ -37,8 +44,29 @@ if "docs" not in st.session_state:
 if "bm25" not in st.session_state:
     st.session_state.bm25 = None
 
-if "uploaded" not in st.session_state:
-    st.session_state.uploaded = False
+if "uploaded_files" not in st.session_state:
+    st.session_state.uploaded_files = []
+
+# ── Helper: Load All Docs from Qdrant ─────────────────────
+
+def load_all_docs_from_qdrant() -> list[Document]:
+    results = client.scroll(
+        collection_name=COLLECTION_NAME,
+        limit=1000,
+        with_payload=True
+    )
+    return [
+        Document(
+            page_content=r.payload["page_content"],
+            metadata={
+                "source": r.payload["source"],
+                "element_type": r.payload["element_type"],
+                "original": r.payload["original"],
+                "chunk_index": r.payload["chunk_index"],
+            }
+        )
+        for r in results[0]
+    ]
 
 # ── Query Rewriter ─────────────────────────────────────────
 
@@ -61,37 +89,54 @@ Only return the rewritten question, nothing else."""),
 # ── Sidebar ────────────────────────────────────────────────
 
 with st.sidebar:
-    st.header("📁 Upload Document")
+    st.header("📁 Upload Documents")
     uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
-    if uploaded_file and not st.session_state.uploaded:
-        with st.spinner("Processing document..."):
-            # Save uploaded file temporarily
+    if uploaded_file and uploaded_file.name not in st.session_state.uploaded_files:
+        with st.spinner(f"Processing {uploaded_file.name}..."):
+
+            # Save temp file
             temp_path = f"temp_{uploaded_file.name}"
             with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            # Ingest
+            # Ingest + upload to Qdrant
             docs = ingest_document(temp_path)
-
-            # Upload to Qdrant
             upload_documents(docs)
-
-            # Build BM25
-            st.session_state.bm25, st.session_state.docs = build_bm25_index(docs)
-            st.session_state.uploaded = True
-
-            # Cleanup temp file
             os.remove(temp_path)
+
+            # Track uploaded file
+            st.session_state.uploaded_files.append(uploaded_file.name)
+
+            # Reload ALL docs from Qdrant and rebuild BM25
+            all_docs = load_all_docs_from_qdrant()
+            st.session_state.bm25, st.session_state.docs = build_bm25_index(all_docs)
 
         st.success(f"✅ Processed {len(docs)} chunks from {uploaded_file.name}")
 
-    if st.session_state.uploaded:
-        st.info(f"📄 {len(st.session_state.docs)} chunks loaded")
+    # Show all uploaded documents
+    if st.session_state.uploaded_files:
+        st.divider()
+        st.subheader("📄 Loaded Documents")
+        for fname in st.session_state.uploaded_files:
+            st.write(f"• {fname}")
+        st.caption(f"Total chunks: {len(st.session_state.docs)}")
 
     st.divider()
 
     if st.button("🗑️ Clear Chat"):
+        st.session_state.chat_history = []
+        st.rerun()
+
+    if st.button("🗑️ Clear All Documents"):
+        client.delete_collection(collection_name=COLLECTION_NAME)
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
+        )
+        st.session_state.uploaded_files = []
+        st.session_state.docs = []
+        st.session_state.bm25 = None
         st.session_state.chat_history = []
         st.rerun()
 
@@ -110,9 +155,9 @@ for message in st.session_state.chat_history:
             st.write(message.content)
 
 # Chat input
-if query := st.chat_input("Ask a question about your document..."):
+if query := st.chat_input("Ask a question about your documents..."):
 
-    if not st.session_state.uploaded:
+    if not st.session_state.uploaded_files:
         st.warning("Please upload a document first.")
     else:
         # Show user message
@@ -122,7 +167,7 @@ if query := st.chat_input("Ask a question about your document..."):
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
 
-                # Step 1 — Rewrite query if follow-up
+                # Step 1 — Rewrite query
                 standalone_query = rewrite_query(query, st.session_state.chat_history)
 
                 # Step 2 — Retrieve
@@ -144,7 +189,9 @@ if query := st.chat_input("Ask a question about your document..."):
 
                 # Step 5 — Show citations
                 with st.expander("📚 Sources"):
-                    st.text(result["citations"])
+                    for i, doc in enumerate(result["source_docs"]):
+                        st.markdown(f"**[{i+1}] {doc.metadata['source']} — chunk {doc.metadata['chunk_index']}**")
+                        st.caption(doc.metadata["original"][:300] + "...")
 
                 # Step 6 — Update history
                 st.session_state.chat_history = update_history(
