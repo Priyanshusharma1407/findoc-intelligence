@@ -1,0 +1,11 @@
+python-dotenv
+langchain-core
+langchain-groq
+langchain-community
+langchain
+qdrant-client
+rank-bm25
+streamlit
+unstructured-client
+sentence-transformers
+requests
