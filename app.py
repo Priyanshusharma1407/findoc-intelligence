@@ -18,9 +18,19 @@ llm = ChatGroq(api_key=GROQ_API_KEY, model="llama-3.1-8b-instant", temperature=0
 
 
 
-if st.text_input("Enter password", type="password") != st.secrets["password"]:
-    st.stop()
+# ── Password Protection ────────────────────────────────────
 
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    password = st.text_input("Enter password", type="password")
+    if password == st.secrets["password"]:
+        st.session_state.authenticated = True
+        st.rerun()
+    elif password:
+        st.error("Incorrect password")
+    st.stop()
 
 # ── Page Config ────────────────────────────────────────────
 
